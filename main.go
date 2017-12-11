@@ -22,11 +22,26 @@ var EncodeOptions = map[string]map[int]int{
 	".webp": map[int]int{lilliput.WebpQuality: 85},
 }
 
+type Options struct {
+	// See ParseOptions for interpretation of Width and Height values
+	Width  int
+	Height int
+}
+
+type Request struct {
+	// URL      *url.URL      // URL of the image to proxy
+	Options Options // Image transformation to perform
+	// Original *http.Request // The original HTTP request
+}
+
+func notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "404", http.StatusNotFound)
+}
 func imageHandler(w http.ResponseWriter, r *http.Request) {
 	var imagePath = r.URL.Path
-	var outputWidth int
-	var outputHeight int
 	var stretch = true
+	var ratio float64
+	ireq := &Request{}
 
 	var client = &http.Client{
 		Timeout: time.Second * 10,
@@ -45,24 +60,8 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Println("GET params were:", r.URL.Query())
-	outputWidth, err = strconv.Atoi(r.URL.Query().Get("w"))
-	if err != nil {
-		msg := fmt.Sprintf("error parsing width, %s\n", err)
-		log.Print(msg)
 
-		http.Error(w, msg, http.StatusBadRequest)
-		return
-	}
-
-	outputHeight, err = strconv.Atoi(r.URL.Query().Get("h"))
-	if err != nil {
-		msg := fmt.Sprintf("error parsing height, %s\n", err)
-		log.Print(msg)
-
-		http.Error(w, msg, http.StatusBadRequest)
-		return
-	}
-
+	ireq.Options = ParseOptions(r.URL.Query())
 	inputBuf, err := ioutil.ReadAll(resp.Body)
 	decoder, err := lilliput.NewDecoder(inputBuf)
 	// this error reflects very basic checks,
@@ -102,12 +101,12 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	// otherwise don't transcode (use existing type)
 	outputType := "." + strings.ToLower(decoder.Description())
 
-	if outputWidth == 0 {
-		outputWidth = header.Width()
-	}
+	ratio = float64(header.Width()) / float64(header.Height())
 
-	if outputHeight == 0 {
-		outputHeight = header.Height()
+	if ireq.Options.Width != 0 && ireq.Options.Height == 0 {
+		ireq.Options.Height = int(float64(ireq.Options.Width) * (1 / (ratio)))
+	} else if ireq.Options.Width == 0 && ireq.Options.Height != 0 {
+		ireq.Options.Width = int(float64(ireq.Options.Height) * (ratio))
 	}
 
 	resizeMethod := lilliput.ImageOpsFit
@@ -117,8 +116,8 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 
 	opts := &lilliput.ImageOptions{
 		FileType:             outputType,
-		Width:                outputWidth,
-		Height:               outputHeight,
+		Width:                ireq.Options.Width,
+		Height:               ireq.Options.Height,
 		ResizeMethod:         resizeMethod,
 		NormalizeOrientation: true,
 		EncodeOptions:        EncodeOptions[outputType],
@@ -138,10 +137,27 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(outputImg)))
 
 	if _, err := w.Write(outputImg); err != nil {
-		log.Println("unable to output image.")
+		log.Println("unable to output ima ge.")
 	}
-	fmt.Printf("image output: %d x %d\n", outputWidth, outputHeight)
+	log.Print(ireq)
 
+}
+
+func ParseOptions(params map[string][]string) Options {
+	var options Options
+
+	for key, value := range params {
+		switch {
+		case len(key) == 0:
+			break
+		case key == "w":
+			options.Width, _ = strconv.Atoi(value[0])
+		case key == "h":
+			options.Height, _ = strconv.Atoi(value[0])
+		}
+	}
+
+	return options
 }
 
 func main() {
@@ -150,6 +166,7 @@ func main() {
 	flag.StringVar(&baseURL, "baseURL", "", "default base URL for relative remote URLs")
 	flag.Parse()
 
+	http.HandleFunc("/favicon.ico", notFoundHandler)
 	http.HandleFunc("/", imageHandler)
 	fmt.Printf("Starting server: %s x %s\n", baseURL, addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
